@@ -20,3 +20,6 @@ venv/
 # Generated run artifacts
 output/*
 !output/.gitkeep
+
+# Prototype render output
+prototypes/out/
