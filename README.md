@@ -94,6 +94,7 @@ hosted model, bake its weights into the image during the build step.
 
 ## See also
 
+- [`docs/iteration-1-plan.md`](docs/iteration-1-plan.md) — our team's plan for the first engine iteration
 - `chameleon_design_schema_v0.9.json` — full input/output field spec
 - `RULES.md` — what's checked, what's graded, and what disqualifies a submission
 - FAQ — for anything not covered above
