@@ -26,8 +26,8 @@ form "Brief §N".
   self-check. Output is deterministic and unchanged when every id and group id is renamed.
 - **Docker:** the image builds with fully pinned dependencies and runs offline (`--network none`) on all three
   samples; two runs give byte-identical JSON, and all 26 tests pass inside it on Python 3.11.
-- **Outstanding:** `tools/evaluate.py` (T3.3, T3.8), the first CI run on GitHub (workflow written, not yet
-  run), the README "Approach" section (T3.7, deferred by team decision), and the P1/P2 tasks in §7.
+- **Outstanding:** the first CI run on GitHub, the README "Approach" section (T3.7, deferred by team decision),
+  the two-reviewer visual check (§9.3), and the P1/P2 tasks in §7.
 - Sections below describe the engine **as built**. Where the build departed from the original plan, the text says so,
   and §14 lists every departure.
 
@@ -544,7 +544,7 @@ Status as of 2026-10-17: ✅ done · 🟡 partly · ❌ not done · ⏸ deferred
 | T0.1 | P0 | All | **Interface checkpoint**: agree on §4 types, function signatures, `TUNABLES` names, section banners, and branch/merge rules | — | Signed-off stub file merged; every function exists and returns a trivially valid value | ✅ Done. Types and signatures in place; some signatures grew during the build (§4). |
 | T3.1 | P0 | Dev 3 | §0 shared types and geometry (`Box`, rotated AABB, overlap) | T0.1 | Rotated AABB matches a hand calculation for the Level-3 ribbon (300×54 at −12° → about 304.7×115.2) | ✅ Done. `_rotated_aabb` uses exactly this formula. |
 | T3.2 | P0 | Dev 3 | Walking skeleton: `resize()` chains the stubs + `fallback_layout` + try/except; one stderr line per task | T0.1 | All 3 samples run; H1–H5 pass; no exceptions; output differs from the baseline (aspect-locked) | ✅ Done (`dev3-integration`). |
-| T3.3 | P0 | Dev 3 | `tools/evaluate.py`: runs samples × target set, writes outputs to `output/eval/`, baseline side by side, contact-sheet PNG, CSV of hard checks and scores | T3.2 | One command produces the contact sheet and CSV for all pairs; JSON schema validation included if `jsonschema` is installed locally | ❌ Not started. A throwaway comparison script exists outside the repo. |
+| T3.3 | P0 | Dev 3 | `tools/evaluate.py`: runs samples × target set, writes outputs to `output/eval/`, baseline side by side, contact-sheet PNG, CSV of hard checks and scores | T3.2 | One command produces the contact sheet and CSV for all pairs; JSON schema validation included if `jsonschema` is installed locally | ✅ Done: `tools/evaluate.py`. Schema validation (H9) runs only when `jsonschema` is installed; it isn't in the venv yet. |
 | T2.1 | P0 | Dev 2 | `_font_manager` + `_measure_text` with Pillow fallback | T0.1 | For every sample text, line breaks equal the renderer's `wrap_text` output; measured height is within 2 px of the ink rows in the rendered PNG | ✅ Done. Line breaks checked against the converter; the 2 px PNG height check was not done. |
 | T1.1 | P0 | Dev 1 | `_build_units`, `_classify_units` | T3.1 | Samples: `bg` → background; L2 circles → decoration; badge/cta/ribbon groups → one unit each; no reliance on ids or filenames | ✅ Done. |
 | T1.2 | P0 | Dev 1 | `_reading_blocks`, `_source_relationships` (prominence, alignment, overlaps) | T1.1, T2.1 | L2 blocks: [badge, logo], [product], [headline], [subhead], [cta]; L3 badges form one sibling set | ✅ Done. |
@@ -560,7 +560,7 @@ Status as of 2026-10-17: ✅ done · 🟡 partly · ❌ not done · ⏸ deferred
 | T1.5 | P1 | Dev 1 | Corner-pinned variants | T1.4 | Pinned variant chosen only when score improves; no new collisions | 🟡 Partly. Corner units are always pinned in lanes; no separate variants. |
 | T1.6 | P1 | Dev 1 | Implicit containment units: an ungrouped shape that fully contains a higher-z text element travels with it | T1.1 | A synthetic button without `group_id` keeps its label inside | ✅ Done. |
 | T2.5 | P1 | Dev 2 | Shape widening when a label can't fit at the floor size | T2.3 | Long-label synthetic button: label ≥ floor size, shape stays within its slot | ✅ Done. Uses the fixed 12 px floor (§11.1). |
-| T3.8 | P1 | Dev 3 | Invariance and determinism checks in `evaluate.py` (§9.3) | T3.3 | All invariance tests pass | 🟡 Partly. Determinism and rename invariance are tested (§9.5); `evaluate.py` doesn't exist. |
+| T3.8 | P1 | Dev 3 | Invariance and determinism checks in `evaluate.py` (§9.3) | T3.3 | All invariance tests pass | ✅ Done: determinism, renamed ids and group ids (not asset ids, see §14 I14), shuffled order. |
 | T1.7 | P2 | Dev 1 | Post-fit re-spacing of lanes using `used` boxes | T2.2 | S6 improves on ≥ 70% of evaluation pairs without hurting S2 | ❌ Not started. |
 | T3.9 | P2 | Dev 3 | Weight tuning pass with a frozen held-out target subset | T3.4 | Tuned weights improve held-out pairs, not just tuned ones | ❌ Not started. Weights were adjusted on the three samples only. |
 
@@ -588,9 +588,10 @@ each merge and posts the contact sheet so regressions are visible immediately.
 
 ### 9.1 What we run
 
-> **Status:** `tools/evaluate.py` is not built yet (T3.3). Until it is, `tests/test_resize.py` runs every sample at 13
-> target sizes through the hard checks and the `main.py` self-check, but there is no contact sheet, CSV, baseline
-> comparison, or schema validation. Visual checks so far were done by hand from rendered candidates.
+> **Status:** built (`tools/evaluate.py`). First full run, 2026-10-17, locally: 37 pairs (3 samples × the 12
+> sizes below + each sample's own target). Ours passes every hard check in all 37, the stretch in 1 (it
+> distorts images); one fallback (L3 at 320×50); no determinism, rename, or shuffle failures. Soft scores only
+> mean something where the hard checks pass, so the stretch's scores are not comparable.
 
 For every **(design, target)** pair, `tools/evaluate.py`:
 
@@ -614,7 +615,7 @@ For every **(design, target)** pair, `tools/evaluate.py`:
   reference keeps every element with 6–12 px text and our scorer rates it 0.850, against 0.754 for our engine's pick;
   the gap is in layout generation, not scoring.
 - **Synthetic variants** built by transforming the samples. No new assets or fonts are added:
-  - Rename every `id`, `group_id`, and `asset_id` to random strings. Output geometry must be identical.
+  - Rename every `id` and `group_id` to random strings (not `asset_id`, see §14 I14). Output geometry must be identical.
   - Shuffle the element list order (allowed to change ties only; must stay valid).
   - Three to six badge groups instead of three.
   - Doubled text length (subhead), to stress fitting.
@@ -645,6 +646,16 @@ Each developer's acceptance tests live in `tests/`. Run them from the repository
 .venv/bin/python tests/test_layout.py                                       # Dev 1: analysis and layouts (plain script)
 .venv/bin/python -m unittest discover -s tests -p "test_*.py" -v            # Dev 2 fitting + Dev 3 resize() tests
 ```
+
+The evaluation harness (§9.1) is separate; it writes `output/eval/summary.csv`, `checks.txt`, and a contact
+sheet per sample:
+
+```bash
+.venv/bin/python tools/evaluate.py            # full grid, ~15 s; add --quick, --sizes 728x90 ..., or --no-render
+```
+
+Its docstring has the command for running it inside the Docker image (Linux text measurement, R15).
+
 
 `test_layout.py` is a plain script, so `unittest` discovery skips its functions; run it separately as above.
 
@@ -811,3 +822,4 @@ Departures from the plan above, and why. Each is reflected in the relevant secti
 | I11 | Owen's [`analysis-2026-10-13.md`](analysis-2026-10-13.md) merged as a historical snapshot. Its platform-measurement finding (R15), `.dockerignore`, pinning, renderer/OS question (Q9), and reference layouts (§9.2) were folded in here | §2.2, §9.2, §11 | Several of its recommendations were already adopted by Dev 1 (floor table, floor ladder, containment, asset ink). |
 | I12 | Font sizes are whole numbers: `_fit_text` searches integers only, and output rounds down | §4.2 | cr-renderer draws glyphs at `int(font_size)`. Rounding *after* fitting left L2's headline with a two-line box but one drawn line in Docker (R15). |
 | I13 | The fallback grows a pill to contain its label; the grid test holds fallback output to the structural checks (H1, H2, H4, H5) only, and allows at most one fallback | §5.5, §9.5 | Under Linux measurement, L3 at 320×50 has 1 px labels taller than their pills. The plan always promised structural validity, not layout quality, for the fallback. |
+| I14 | The rename-invariance check renames ids and group ids, not asset ids | §9.2, §9.3 | Dev 1 reads each asset's alpha bounds by file name (P7), so a renamed asset is a missing asset and the layout may legitimately change. |
