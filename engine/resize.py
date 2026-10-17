@@ -487,7 +487,7 @@ def fit_candidate(analysis: SourceAnalysis, cand: Candidate, target: dict[str, A
     except Exception as exc:
         out.notes.append(f"FIT ERROR hierarchy: {exc}")
     try:
-        floors = _Ctx(analysis, target).floors  # Use Dev 1's full readability floors, not relaxed rung.
+        floors = readability_floors(analysis, target)  # Dev 1's full floors, not the candidate's relaxed rung.
     except Exception:
         floors = {}
     for uid, unit in analysis.units.items():
@@ -849,6 +849,40 @@ TUNABLES.update({
 })
 
 
+def readability_floors(an: SourceAnalysis, target: dict[str, Any]) -> dict[str, float]:
+    """Readability floor per text content unit in TARGET px at ladder rung 1 (judge-px floors / render downscale).
+    Public: candidate generation relaxes these per rung; fitting reports and validation always use them in full."""
+    T = TUNABLES
+    TW, TH = max(1, int(_num(target.get("width"), 1.0))), max(1, int(_num(target.get("height"), 1.0)))
+    units = [an.units[u] for u in an.content]
+    ss, jp = min(TW, TH), min(1.0, 2048.0 / max(TW, TH))
+    pts = T["floor_px"]
+    if ss <= pts[0][0]:
+        tiers = pts[0][1]
+    elif ss >= pts[-1][0]:
+        tiers = pts[-1][1]
+    else:
+        i = next(i for i in range(1, len(pts)) if ss <= pts[i][0])
+        t = (ss - pts[i - 1][0]) / (pts[i][0] - pts[i - 1][0])
+        tiers = tuple(a + (b - a) * t for a, b in zip(pts[i - 1][1], pts[i][1]))
+    top, label, foot = tiers
+    labels = [u.fs_max for u in units if u.has_text and u.has_shape and not u.band]
+    out: dict[str, float] = {}
+    for u in units:
+        if not u.has_text:
+            continue
+        f = foot if u.band else (top if not u.has_shape or u.fs_max >= 0.85 * max(labels) else label)
+        big = max((an.elements[i] for i in u.member_ids if an.elements[i].get("type") == "text"),
+                  key=lambda e: _num(e.get("font_size")))
+        f += T["floor_regular_bonus"] * (big.get("font_weight", "regular") == "regular")
+        f += T["floor_lowalpha_bonus"] * (_eff_alpha(big) <= 0.6)
+        out[u.uid] = f
+    free = sorted((u for u in units if u.uid in out and not u.has_shape and not u.band), key=lambda u: -u.fs_max)
+    for i, u in enumerate(free):        # a bigger free text never gets a lower floor than a smaller one (hierarchy)
+        out[u.uid] = max([out[u.uid]] + [out[v.uid] for v in free[i + 1:] if v.fs_max < u.fs_max])
+    return {k: v / jp for k, v in out.items()}
+
+
 class _Ctx:
     """Per-(analysis, target) constants and caches shared by every candidate."""
 
@@ -868,7 +902,7 @@ class _Ctx:
         self.bands = [u for u in self.units if u.band]
         furniture = {u.uid for u in self.pins + self.bands}
         self.blocks = [b for b in ([an.units[u] for u in blk if u not in furniture] for blk in an.blocks) if b]
-        self.floors = self._floors()
+        self.floors = readability_floors(an, target)
         self.prof: dict[tuple[str, int], list[tuple[int, float, float]]] = {}
 
     def flex(self, u: LayoutUnit) -> bool:
@@ -876,36 +910,6 @@ class _Ctx:
 
     def el(self, u: LayoutUnit) -> dict[str, Any]:
         return self.an.elements[u.member_ids[0]]
-
-    def _floors(self) -> dict[str, float]:
-        """Readability floor per unit in TARGET px at ladder rung 1 (judge-px floors / render downscale)."""
-        T, an = TUNABLES, self.an
-        ss, jp = min(self.TW, self.TH), min(1.0, 2048.0 / max(self.TW, self.TH))
-        pts = T["floor_px"]
-        if ss <= pts[0][0]:
-            tiers = pts[0][1]
-        elif ss >= pts[-1][0]:
-            tiers = pts[-1][1]
-        else:
-            i = next(i for i in range(1, len(pts)) if ss <= pts[i][0])
-            t = (ss - pts[i - 1][0]) / (pts[i][0] - pts[i - 1][0])
-            tiers = tuple(a + (b - a) * t for a, b in zip(pts[i - 1][1], pts[i][1]))
-        top, label, foot = tiers
-        labels = [u.fs_max for u in self.units if u.has_text and u.has_shape and not u.band]
-        out: dict[str, float] = {}
-        for u in self.units:
-            if not u.has_text:
-                continue
-            f = foot if u.band else (top if not u.has_shape or u.fs_max >= 0.85 * max(labels) else label)
-            big = max((an.elements[i] for i in u.member_ids if an.elements[i].get("type") == "text"),
-                      key=lambda e: _num(e.get("font_size")))
-            f += T["floor_regular_bonus"] * (big.get("font_weight", "regular") == "regular")
-            f += T["floor_lowalpha_bonus"] * (_eff_alpha(big) <= 0.6)
-            out[u.uid] = f
-        free = sorted((u for u in self.units if u.uid in out and not u.has_shape and not u.band), key=lambda u: -u.fs_max)
-        for i, u in enumerate(free):        # a bigger free text never gets a lower floor than a smaller one (hierarchy)
-            out[u.uid] = max([out[u.uid]] + [out[v.uid] for v in free[i + 1:] if v.fs_max < u.fs_max])
-        return {k: v / jp for k, v in out.items()}
 
     def scale(self, u: LayoutUnit, k: float, rung: float) -> float:
         f = self.floors.get(u.uid, 0.0) * rung
@@ -1348,8 +1352,351 @@ def generate_candidates(an: SourceAnalysis, target: dict[str, Any]) -> list[Cand
 
 
 # =====================================================================================
-# §6 resize() (Dev 3): baseline stays until the orchestration replaces it
+# §4 Validation and scoring (Dev 3)
+# validate() runs the hard checks H1-H8 (plan §5.3) on the FINAL output elements and the soft metrics S1-S7 (§5.4).
+# A candidate with any hard failure is never selected as-is.
 # =====================================================================================
+
+TUNABLES.update({
+    "weights": {"readability": 0.25, "collisions": 0.20, "fidelity": 0.17, "wrapping": 0.08, "hierarchy": 0.10,
+                "utilization": 0.08, "spacing": 0.06, "alignment": 0.06},   # wrapping added after review; sums to 1
+    "tol_px": 0.5,                    # H4 / H6 / H7 geometric tolerance
+    "aspect_tol": 0.01,               # H5: non-background image aspect drift
+    "util_band": (0.55, 0.75),        # S5: content coverage of the inner canvas that scores 1.0
+    "collide_image_mult": 3.0,        # S2: text over a non-background image counts this many times
+    "repair_tries": 3,                # failed candidates repaired (best score first) before the fallback
+    "repair_shrink": 0.9, "repair_steps": 12,
+})
+
+_GEOMETRY = ("x", "y", "width", "height", "font_size")
+
+
+def _text_ink_out(el: dict[str, Any]) -> Box:
+    """Drawn extent of an OUTPUT text element (top-aligned, horizontally per text_align)."""
+    if _num(el.get("rotation")):
+        return _rotated_aabb(el)
+    box = _element_box(el)
+    _, tw, th = _measure_text(el, _num(el.get("font_size"), 1.0), box.w)
+    align = el.get("text_align", "left")
+    dx = (box.w - tw) / 2 if align == "center" else box.w - tw if align == "right" else 0.0
+    return Box(box.x + dx, box.y, tw, th)
+
+
+def _hard_checks(an: SourceAnalysis, fitted: FittedCandidate, tw: int, th: int) -> list[str]:
+    T, tol = TUNABLES, TUNABLES["tol_px"]
+    out, hard = fitted.elements, []
+    if list(out) != an.order:
+        hard.append("H1 element ids differ from the source")
+        return hard
+    hard += [n for n in fitted.notes if n.startswith("FIT ERROR")]
+    canvas = Box(0, 0, tw, th)
+    bg_ids = {i for uid in an.backgrounds for i in an.units[uid].member_ids}
+    for i, el in out.items():
+        src = an.elements[i]
+        if el.get("type") != src.get("type"):
+            hard.append(f"H1 type changed: {i}")
+        changed = [k for k in set(src) | set(el) if k not in _GEOMETRY and src.get(k) != el.get(k)]
+        if changed:
+            hard.append(f"H2 fields changed on {i}: {sorted(changed)}")
+        nums = [el.get(k) for k in ("x", "y", "width", "height")] + ([el.get("font_size")] if el.get("type") == "text" else [])
+        if not all(isinstance(v, (int, float)) and math.isfinite(v) for v in nums):
+            hard.append(f"H4 non-finite geometry: {i}")
+            continue
+        if el["width"] < 1 or el["height"] < 1 or (el.get("type") == "text" and el["font_size"] < 1):
+            hard.append(f"H4 below 1 px: {i}")
+        if not canvas.contains(_rotated_aabb(el), tol):
+            hard.append(f"H4 off canvas: {i}")
+        if el.get("type") == "image" and i not in bg_ids and src.get("fit") != "cover":
+            sa, oa = _num(src.get("width")) / max(1e-9, _num(src.get("height"))), el["width"] / max(1e-9, el["height"])
+            if abs(oa / sa - 1) > T["aspect_tol"]:
+                hard.append(f"H5 image aspect changed: {i}")
+        if el.get("type") == "text":
+            lines, w, h = _measure_text(el, el["font_size"], el["width"])
+            limit = el.get("max_lines")
+            if w > el["width"] + tol or h > el["height"] + tol or (limit is not None and lines > limit):
+                hard.append(f"H6 text overflows its box: {i}")
+    for u in an.units.values():                                         # H7 labels stay inside their shapes
+        shapes = [i for i in u.member_ids if an.elements[i].get("type") == "shape"]
+        for t in (i for i in u.member_ids if an.elements[i].get("type") == "text"):
+            for sh in shapes:
+                if _element_box(an.elements[sh]).contains(_element_box(an.elements[t]), tol) \
+                        and not _element_box(out[sh]).contains(_element_box(out[t]), tol):
+                    hard.append(f"H7 label left its shape: {t}")
+    unit_of = {i: uid for uid, u in an.units.items() for i in u.member_ids}
+    texts = [(i, _text_ink_out(el)) for i, el in out.items() if el.get("type") == "text"]
+    for (a, ba), (b, bb) in combinations(texts, 2):                    # H8 text on text from different units
+        if unit_of[a] != unit_of[b] and ba.intersect(bb) > 0 and frozenset((unit_of[a], unit_of[b])) not in an.src_overlaps:
+            hard.append(f"H8 text overlaps text: {a} / {b}")
+    return hard
+
+
+def _kendall(pairs: list[tuple[float, float]]) -> float:
+    """Kendall tau of (source, output) value pairs mapped to 0..1 (1 = same order). Source ties are skipped."""
+    agree = total = 0
+    for (s1, o1), (s2, o2) in combinations(pairs, 2):
+        if s1 == s2:
+            continue
+        total += 1
+        agree += (s1 - s2) * (o1 - o2) > 0
+    return agree / total if total else 1.0
+
+
+def _gap_cv(cont: list[LayoutUnit], boxes: dict[str, Box]) -> float:
+    """S6 helper: coefficient of variation (capped at 1) of the gap from each unit to the nearest unit below it that
+    shares some horizontal extent."""
+    gaps = []
+    for a in cont:
+        ba = boxes[a.uid]
+        below = [boxes[b.uid].y - ba.bottom for b in cont if b is not a
+                 and min(ba.right, boxes[b.uid].right) > max(ba.x, boxes[b.uid].x) and boxes[b.uid].y >= ba.bottom - 1e-6]
+        if below:
+            gaps.append(min(below))
+    if len(gaps) < 2 or sum(gaps) <= 0:
+        return 0.0
+    mean = sum(gaps) / len(gaps)
+    return min(1.0, math.sqrt(sum((g - mean) ** 2 for g in gaps) / len(gaps)) / mean)
+
+
+def _aligned_share(cont: list[LayoutUnit], boxes: dict[str, Box], tol: float) -> float:
+    """S7 helper: share of units sharing a left, centre or right line with another unit."""
+    if len(cont) < 2:
+        return 1.0
+    lines = {u.uid: (boxes[u.uid].x, boxes[u.uid].cx, boxes[u.uid].right) for u in cont}
+    return sum(any(abs(p - q) <= tol for v in cont if v is not u for p, q in zip(lines[u.uid], lines[v.uid]))
+               for u in cont) / len(cont)
+
+
+def _soft_metrics(an: SourceAnalysis, fitted: FittedCandidate, tw: int, th: int) -> dict[str, float]:
+    T, out = TUNABLES, fitted.elements
+    cont = [an.units[uid] for uid in an.content]
+    used = {u.uid: fitted.used[u.uid] for u in cont}
+    if not cont:
+        return {k: 1.0 for k in T["weights"]}
+    # S1 readability: per text, 0.5 * (size / area-preserving size, capped at 1) + 0.5 * (at or above its floor),
+    # weighted by the unit's prominence.
+    try:
+        floors = readability_floors(an, {"width": tw, "height": th})
+    except Exception:
+        floors = {}
+    area_scale = math.sqrt((tw * th) / (an.canvas_w * an.canvas_h))
+    num = den = 0.0
+    for u in cont:
+        for i in u.member_ids:
+            if out[i].get("type") != "text":
+                continue
+            fs, src_fs = _num(out[i].get("font_size"), 1.0), _num(an.elements[i].get("font_size"), 1.0)
+            r = 0.5 * min(1.0, fs / max(1e-9, src_fs * area_scale)) + 0.5 * (fs >= floors.get(u.uid, 0.0) - 1e-6)
+            wgt = 0.2 + u.prominence
+            num, den = num + wgt * r, den + wgt
+    readability = num / den if den else 1.0
+    # S2 unintended collisions between content units (source overlaps are intentional).
+    total = sum(b.area for b in used.values()) or 1.0
+    bad = 0.0
+    for a, b in combinations(cont, 2):
+        if frozenset((a.uid, b.uid)) in an.src_overlaps:
+            continue
+        ov = used[a.uid].intersect(used[b.uid])
+        if ov and ((a.has_text and b.has_image) or (b.has_text and a.has_image)):
+            ov *= T["collide_image_mult"]
+        bad += ov
+    collisions = 1.0 - min(1.0, bad / total)
+    # S3 hierarchy: text order by font size, image order by area.
+    tx = [(_num(an.elements[i].get("font_size")), _num(out[i].get("font_size"))) for i in an.order if out[i].get("type") == "text"]
+    im = [(u.src_box.area, used[u.uid].area) for u in cont if u.has_image and not u.has_text]
+    parts = [_kendall(p) for p in (tx, im) if len(p) > 1]
+    hierarchy = sum(parts) / len(parts) if parts else 1.0
+    # S4 composition fidelity: mean displacement of normalised unit centres.
+    disp = [math.hypot(u.src_box.cx / an.canvas_w - used[u.uid].cx / tw, u.src_box.cy / an.canvas_h - used[u.uid].cy / th)
+            for u in cont]
+    fidelity = 1.0 - min(1.0, sum(disp) / len(disp) / math.sqrt(0.5))
+    # S5 utilization: content area over the canvas, best inside the band.
+    cover = min(1.0, total / (tw * th))
+    lo, hi = T["util_band"]
+    utilization = cover / lo if cover < lo else 1.0 if cover <= hi else max(0.0, 1.0 - (cover - hi) / (1.0 - hi))
+    # S8 wrapping: prominence-weighted share of texts that wrap onto no more lines than in the source
+    # (a one-line headline broken into "Chase the / Light" reads worse than a slightly smaller one-liner).
+    num = den = 0.0
+    for u in cont:
+        for i in u.member_ids:
+            src = an.elements[i]
+            if src.get("type") != "text":
+                continue
+            n_src = _measure_text(src, _num(src.get("font_size"), 1.0), _num(src.get("width"), 1.0))[0]
+            n_out = _measure_text(out[i], _num(out[i].get("font_size"), 1.0), _num(out[i].get("width"), 1.0))[0]
+            wgt = 0.2 + u.prominence
+            num, den = num + wgt * (n_out <= n_src), den + wgt
+    wrapping = num / den if den else 1.0
+    # S6 / S7 are judged against the source: a layout only loses for being less even or less aligned than the original.
+    src_boxes = {u.uid: u.src_box for u in cont}
+    spacing = 1.0 - max(0.0, _gap_cv(cont, used) - _gap_cv(cont, src_boxes))
+    alignment = 1.0 - max(0.0, _aligned_share(cont, src_boxes, max(2.0, 0.005 * an.canvas_w))
+                          - _aligned_share(cont, used, max(2.0, 0.005 * tw)))
+    return {"readability": readability, "collisions": collisions, "hierarchy": hierarchy, "fidelity": fidelity,
+            "utilization": utilization, "spacing": spacing, "alignment": alignment, "wrapping": wrapping}
+
+
+def validate(analysis: SourceAnalysis, fitted: FittedCandidate, target: dict[str, Any]) -> Report:
+    tw, th = _target_size(target)
+    hard = _hard_checks(analysis, fitted, tw, th)
+    try:
+        soft = _soft_metrics(analysis, fitted, tw, th)
+    except Exception as exc:                       # a scoring bug must not hide a valid candidate
+        soft = {k: 0.0 for k in TUNABLES["weights"]}
+        fitted.notes.append(f"SCORE ERROR: {type(exc).__name__}: {exc}")
+    score = sum(TUNABLES["weights"][k] * v for k, v in soft.items())
+    return Report(hard, soft, round(score, 6))
+
+
+# =====================================================================================
+# §5 Selection, repair, fallback (Dev 3)
+# =====================================================================================
+
+def _select(scored: list[tuple[FittedCandidate, Report]]) -> tuple[FittedCandidate, Report] | None:
+    """Highest score among candidates with no hard failure; ties go to the earlier candidate."""
+    best = None
+    for fc, rep in scored:
+        if not rep.hard and (best is None or rep.score > best[1].score + 1e-9):
+            best = (fc, rep)
+    return best
+
+
+def _scale_members(els: dict[str, dict[str, Any]], ids: list[str], f: float) -> None:
+    """Shrink a unit uniformly about its centre (geometry and font sizes)."""
+    box = _union([_element_box(els[i]) for i in ids])
+    for i in ids:
+        el = els[i]
+        _set_box(el, _element_box(el).scaled(f, box.cx, box.cy))
+        if el.get("type") == "text":
+            el["font_size"] = max(1.0, _num(el.get("font_size"), 1.0) * f)
+
+
+def _repair(analysis: SourceAnalysis, fitted: FittedCandidate, target: dict[str, Any]) -> FittedCandidate:
+    """One bounded pass: lift sub-pixel boxes to 1 px, refit overflowing text, shrink units whose text collides, then
+    slide every unit back inside the canvas."""
+    import copy
+    tw, th = _target_size(target)
+    els = copy.deepcopy(fitted.elements)
+    unit_of = {i: uid for uid, u in analysis.units.items() for i in u.member_ids}
+    for el in els.values():
+        b = _element_box(el)
+        if b.w < 1 or b.h < 1:
+            _set_box(el, Box(b.cx - max(1.0, b.w) / 2, b.cy - max(1.0, b.h) / 2, max(1.0, b.w), max(1.0, b.h)))
+        if el.get("type") == "text":
+            el["font_size"] = max(1.0, _num(el.get("font_size"), 1.0))
+            box = _element_box(el)
+            fit = _fit_text(el, box, el["font_size"])
+            if not fit.fits:   # grow the box downward when the text needs more height than allocated
+                _, _, need = _measure_text(el, fit.font_size, box.w)
+                box = Box(box.x, box.y, box.w, max(box.h, need + 1))
+            el["font_size"] = fit.font_size
+            _set_box(el, box)
+    for _ in range(TUNABLES["repair_steps"]):
+        texts = [(i, _text_ink_out(el)) for i, el in els.items() if el.get("type") == "text"]
+        hit = None
+        for (a, ba), (b, bb) in combinations(texts, 2):
+            ua, ub = unit_of[a], unit_of[b]
+            if ua != ub and ba.intersect(bb) > 0 and frozenset((ua, ub)) not in analysis.src_overlaps:
+                hit = min((ua, ub), key=lambda u: analysis.units[u].prominence)
+                break
+        if hit is None:
+            break
+        _scale_members(els, analysis.units[hit].member_ids, TUNABLES["repair_shrink"])
+    for u in analysis.units.values():               # keep every unit inside the canvas (translate, then shrink)
+        if u.uid in analysis.backgrounds:
+            continue
+        box = _union([_rotated_aabb(els[i]) for i in u.member_ids])
+        if box.w > tw or box.h > th:
+            _scale_members(els, u.member_ids, min(tw / box.w, th / box.h) * 0.999)
+            box = _union([_rotated_aabb(els[i]) for i in u.member_ids])
+        dx = -box.x if box.x < 0 else tw - box.right if box.right > tw else 0.0
+        dy = -box.y if box.y < 0 else th - box.bottom if box.bottom > th else 0.0
+        for i in u.member_ids:
+            _set_box(els[i], _element_box(els[i]).translated(dx, dy))
+    rep = FittedCandidate(fitted.candidate, els, {}, {}, [n for n in fitted.notes if not n.startswith("FIT ERROR")]
+                          + ["repaired"])
+    for uid, u in analysis.units.items():
+        rep.used[uid] = _union([_rotated_aabb(els[i]) for i in u.member_ids])
+    _round_elements(rep.elements)
+    return rep
+
+
+def fallback_layout(source: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
+    """Letterbox: backgrounds full-bleed, everything else one rigid composition at s = min(sx, sy), centred. Always
+    structurally valid; visually weak on extreme ratios (plan §5.5). Uses as little of the engine as possible."""
+    tw, th = _target_size(target)
+    canvas = source.get("canvas") or {}
+    sw, sh = max(1.0, _num(canvas.get("width"), 1.0)), max(1.0, _num(canvas.get("height"), 1.0))
+    s = min(tw / sw, th / sh)
+    ox, oy = (tw - sw * s) / 2, (th - sh * s) / 2
+    out = []
+    for el in source.get("elements") or []:
+        el = dict(el)
+        b = Box(_num(el.get("x")), _num(el.get("y")), _num(el.get("width"), 1.0), _num(el.get("height"), 1.0))
+        full = el.get("type") in ("image", "shape") and Box(0, 0, sw, sh).intersect(b) >= 0.9 * sw * sh
+        if full:
+            nb = Box(0, 0, tw, th)
+        else:
+            nb = Box(ox + b.x * s, oy + b.y * s, max(1.0, b.w * s), max(1.0, b.h * s))
+        if el.get("type") == "text":
+            el["font_size"] = max(1.0, _num(el.get("font_size"), 16.0) * s)
+            try:
+                _, _, need = _measure_text(el, el["font_size"], nb.w)
+                nb = Box(nb.x, nb.y, nb.w, max(nb.h, need))
+            except Exception:
+                pass
+        _set_box(el, nb)
+        aabb = _rotated_aabb(el)                     # shrink, then slide the drawn bounds inside the canvas
+        if aabb.w > tw or aabb.h > th:
+            f = min(tw / aabb.w, th / aabb.h) * 0.999
+            nb = Box(nb.cx - nb.w * f / 2, nb.cy - nb.h * f / 2, max(1.0, nb.w * f), max(1.0, nb.h * f))
+            if el.get("type") == "text":
+                el["font_size"] = max(1.0, el["font_size"] * f)
+            _set_box(el, nb)
+            aabb = _rotated_aabb(el)
+        dx = -aabb.x if aabb.x < 0 else tw - aabb.right if aabb.right > tw else 0.0
+        dy = -aabb.y if aabb.y < 0 else th - aabb.bottom if aabb.bottom > th else 0.0
+        _set_box(el, nb.translated(dx, dy))
+        out.append(el)
+    els = {str(i): e for i, e in enumerate(out)}
+    _round_elements(els)
+    return {"canvas": {"width": tw, "height": th}, "elements": out}
+
+
+# =====================================================================================
+# §6 resize() (Dev 3)
+# =====================================================================================
+
+def _target_size(target: dict[str, Any]) -> tuple[int, int]:
+    return max(1, int(round(_num(target.get("width"), 1.0)))), max(1, int(round(_num(target.get("height"), 1.0))))
+
+
+def _sanitize(source: dict[str, Any]) -> dict[str, Any]:
+    """Deep copy with finite numerics, so every helper downstream can assume clean geometry."""
+    import copy
+    src = copy.deepcopy(source)
+    for el in src.get("elements") or []:
+        for k, default in (("x", 0.0), ("y", 0.0), ("width", 1.0), ("height", 1.0)):
+            if not isinstance(el.get(k), (int, float)) or not math.isfinite(el[k]):
+                el[k] = _num(el.get(k), default)
+        if el.get("type") == "text" and (not isinstance(el.get("font_size"), (int, float)) or not el["font_size"] > 0):
+            el["font_size"] = max(1.0, _num(el.get("font_size"), 16.0))
+    return src
+
+
+def _round_elements(els: dict[str, dict[str, Any]]) -> None:
+    """Two decimals for geometry; font sizes are rounded DOWN so a fitted text never grows."""
+    for el in els.values():
+        for k in ("x", "y", "width", "height"):
+            if isinstance(el.get(k), (int, float)):
+                el[k] = round(el[k], 2)
+        if el.get("type") == "text" and isinstance(el.get("font_size"), (int, float)):
+            el["font_size"] = max(1.0, math.floor(el["font_size"] * 100) / 100)
+
+
+def _log(msg: str) -> None:
+    import sys
+    print(msg, file=sys.stderr)
+
 
 def resize(source: dict[str, Any], target_canvas: dict[str, Any]) -> dict[str, Any]:
     """
@@ -1384,34 +1731,49 @@ def resize(source: dict[str, Any], target_canvas: dict[str, Any]) -> dict[str, A
     layout model, heuristics, whatever you choose. Latency is not a scoring
     concern (see RULES.md) — spend your effort on quality, not speed.
     """
-
-    # ------------------------------------------------------------------
-    # Naive baseline so this file runs out of the box. This is a uniform
-    # stretch — literally the thing the brief tells you NOT to do ("a
-    # naive program stretches the picture; a good one moves the
-    # furniture"). It's here so `python -m engine.main` produces valid,
-    # schema-correct output on day one. Replace the body of this function;
-    # do not just tune these three lines.
-    # ------------------------------------------------------------------
-    scale_x = target_canvas["width"] / source["canvas"]["width"]
-    scale_y = target_canvas["height"] / source["canvas"]["height"]
-
-    out_elements = []
-    for el in source["elements"]:
-        el = dict(el)  # shallow copy — don't mutate the input
-        el["x"] = el["x"] * scale_x
-        el["y"] = el["y"] * scale_y
-        el["width"] = el["width"] * scale_x
-        el["height"] = el["height"] * scale_y
-        if el["type"] == "text":
-            # font_size scaling isn't required to be uniform — this is
-            # just a starting point. Floored at 1px: the schema requires
-            # font_size >= 1, and an extreme downscale (e.g. a tall poster
-            # squeezed into a short banner) can otherwise compute < 1.
-            el["font_size"] = max(1.0, el["font_size"] * min(scale_x, scale_y))
-        out_elements.append(el)
-
-    return {
-        "canvas": {"width": target_canvas["width"], "height": target_canvas["height"]},
-        "elements": out_elements,
-    }
+    import os
+    import time
+    t0 = time.perf_counter()
+    debug = os.environ.get("CHAMELEON_DEBUG") == "1"
+    tw, th = _target_size(target_canvas)
+    tag = f"[resize {tw}x{th}]"
+    try:
+        src = _sanitize(source)
+        target = {"width": tw, "height": th}
+        an = analyze_source(src)
+        scored = []
+        for cand in generate_candidates(an, target):
+            fitted = fit_candidate(an, cand, target)
+            _round_elements(fitted.elements)
+            scored.append((fitted, validate(an, fitted, target)))
+            if debug:
+                rep = scored[-1][1]
+                _log(f"{tag}   {cand.name:24s} score={rep.score:.3f} hard={len(rep.hard)} "
+                     + " ".join(f"{k[:4]}={v:.2f}" for k, v in rep.soft.items()) + (f"  {rep.hard[:3]}" if rep.hard else ""))
+        best, how = _select(scored), "selected"
+        if best is None:
+            for fitted, _ in sorted(scored, key=lambda p: -p[1].score)[:TUNABLES["repair_tries"]]:
+                fixed = _repair(an, fitted, target)
+                rep = validate(an, fixed, target)
+                if debug:
+                    _log(f"{tag}   repair {fitted.candidate.name}: hard={rep.hard[:3]}")
+                if not rep.hard:
+                    best, how = (fixed, rep), "repaired"
+                    break
+        if best is None:
+            reasons = sorted({h.split(":")[0] for _, rep in scored for h in rep.hard})
+            _log(f"{tag} FALLBACK: no valid candidate among {len(scored)} ({', '.join(reasons)})")
+            return fallback_layout(src, target)
+        fitted, rep = best
+        low = sum(n.startswith("Below readability floor") for n in fitted.notes)
+        valid = sum(not r.hard for _, r in scored)
+        _log(f"{tag} {how} {fitted.candidate.name} score={rep.score:.3f} ({valid}/{len(scored)} candidates valid, "
+             f"{low} text(s) below readability floor) in {time.perf_counter() - t0:.2f}s")
+        return {"canvas": {"width": tw, "height": th}, "elements": [fitted.elements[i] for i in an.order]}
+    except Exception as exc:
+        _log(f"{tag} FALLBACK: {type(exc).__name__}: {exc}")
+        try:
+            return fallback_layout(source, {"width": tw, "height": th})
+        except Exception as exc2:   # last resort: never raise out of resize() (plan R8)
+            _log(f"{tag} FALLBACK FAILED: {type(exc2).__name__}: {exc2}; returning the source geometry")
+            return {"canvas": {"width": tw, "height": th}, "elements": [dict(e) for e in source.get("elements") or []]}
