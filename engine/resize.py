@@ -15,11 +15,13 @@ from itertools import combinations
 from pathlib import Path
 from typing import Any
 
+from functools import lru_cache
+
 # Section ownership (docs/iteration-1-plan.md §6). Each developer edits only their own sections.
 #   §0 shared types, geometry, TUNABLES ........... Dev 3 (changes reviewed by all)
 #   §1 source analysis ............................ Dev 1
 #   §2 candidate generation ....................... Dev 1
-#   §3 text and image fitting ..................... Dev 2   (only `_measure_text` is stubbed below)
+#   §3 text and image fitting ..................... Dev 2
 #   §4-§6 validation, fallback, resize() .......... Dev 3   (baseline `resize()` kept until replaced)
 
 # =====================================================================================
@@ -185,27 +187,326 @@ class Report:
 
 
 # =====================================================================================
-# §3 (Dev 2) STUB: `_measure_text`. Dev 2 replaces this with the renderer-parity measurement.
-# Contract (plan §4.2): `_measure_text(el, font_size, box_w) -> (lines, text_w, text_h)`;
-# text_w = widest line incl. letter_spacing, text_h = (lines-1)*fs*lh + ascent + descent.
+# §3 Text and image fitting (Dev 2)
+# Public handoff: fit_candidate(analysis, candidate, target) -> FittedCandidate.
+# Failed fits are reported, never hidden by deleting or changing source content.
 # =====================================================================================
 
+TUNABLES.update({"fit_iterations": 24, "fit_default_floor": 12.0})
+
+
+@lru_cache(maxsize=1)
+def _font_manager():
+    try:
+        from renderer.converter.brand_fonts import load_brand_font_manager
+        return load_brand_font_manager(str(Path(__file__).resolve().parent.parent / "brand_kit/fonts"))
+    except (ImportError, OSError):
+        return None
+
+
+@lru_cache(maxsize=2048)
+def _font_metrics(family, weight, style, size, text, fallback):
+    """Character advances and vertical extent. Cache font work across candidates."""
+    if not fallback:
+        import skia
+        face = skia.Typeface.MakeFromData(_font_manager().lookup(family, weight, style))
+        font = skia.Font(face, size)
+        metrics = font.getMetrics()
+        return tuple(font.getWidths(font.textToGlyphs(text))), -metrics.fAscent + metrics.fDescent
+    from PIL import ImageFont
+    root = Path(__file__).resolve().parent.parent / "brand_kit/fonts"
+    suffix = {"regular": "Regular", "bold": "Bold", "italic": "Italic", "bolditalic": "BoldItalic"}[style]
+    paths = [root / (family.replace(" ", "") + "-" + suffix + ".ttf")]
+    paths += [root / (family.replace(" ", "") + "-Regular.ttf")]
+    font = None
+    for path in paths:
+        try:
+            font = ImageFont.truetype(str(path), max(1, round(size)))
+            break
+        except OSError:
+            pass
+    if font is None:
+        font = ImageFont.load_default(size=max(1, round(size)))
+    ascent, descent = font.getmetrics()
+    return tuple(font.getlength(c) for c in text), ascent + descent
+
+
+def _wrap_fallback(text, widths, max_width):
+    """Same space-replacement algorithm as converter.wrap, without importing skia."""
+    if not text or max_width <= 0:
+        return text
+    chars, total, last = list(text), 0.0, None
+    for i, char in enumerate(chars):
+        if char == "\n":
+            total, last = 0.0, None
+            continue
+        if total + widths[i] > max_width and last is not None:
+            chars[last] = "\n"
+            total = sum(widths[j] for j in range(last + 1, i + 1) if chars[j] != "\n")
+            last = None
+        else:
+            total += widths[i]
+        if char == " ":
+            last = i
+    return "".join(chars)
+
+
+@lru_cache(maxsize=8192)
+def _measure_cached(payload, size, box_w, fallback):
+    import json
+    from itertools import groupby
+    el = json.loads(payload)
+    text = str(el.get("content", ""))
+    if not text:
+        return 0, 0.0, 0.0
+    family = el.get("font_family", "Montserrat")
+    bold_weights = {"bold", "semibold", "extrabold", "black"}
+    weight = str(el.get("font_weight", "regular")).lower()
+    bold = weight in bold_weights
+    italic = el.get("font_style", el.get("italic")) in ("italic", True)
+    style = "bolditalic" if bold and italic else "bold" if bold else "italic" if italic else "regular"
+    advances, _ = _font_metrics(family, weight, style, size, text, fallback)
+    if fallback:
+        wrapped = _wrap_fallback(text, advances, box_w)
+    else:
+        from renderer.converter.wrap import wrap_text
+        wrapped = wrap_text(text, list(advances), box_w)
+    # Converter applies style runs after wrapping, with inclusive end offsets.
+    styles = [(bold, italic, el.get("color", "rgba(0,0,0,1)")) for _ in text]
+    for run in el.get("style_runs") or []:
+        for i in range(max(0, int(run.get("start", 0))), min(len(text), int(run.get("end", len(text)-1)) + 1)):
+            b, it, color = styles[i]
+            styles[i] = (str(run["font_weight"]).lower() in bold_weights if "font_weight" in run else b,
+                         run.get("font_style", run.get("italic")) in ("italic", True) if "font_style" in run or "italic" in run else it,
+                         run.get("color", color))
+    spacing = _num(el.get("letter_spacing"))
+    widths, heights, offset = [], [], 0
+    for line in wrapped.split("\n"):
+        line_w, line_h = 0.0, 0.0
+        for (b, it, _), indices in groupby(range(offset, offset + len(line)), key=lambda i: styles[i]):
+            indices = list(indices)
+            span = wrapped[indices[0]:indices[-1]+1]
+            if el.get("capitalize"):
+                span = span.upper()
+            st = "bolditalic" if b and it else "bold" if b else "italic" if it else "regular"
+            ws, h = _font_metrics(family, "bold" if b else "regular", st, max(1, int(size)), span, fallback)
+            line_w += sum(ws) + spacing * max(0, len(ws)-1)
+            line_h = max(line_h, h)
+        widths.append(line_w)
+        heights.append(line_h)
+        offset += len(line) + 1
+    step = size * (_num(el.get("line_height"), 1.2) or 1.0)
+    return len(widths), max(widths), max(i * step + h for i, h in enumerate(heights))
+
+
 def _measure_text(el: dict[str, Any], font_size: float, box_w: float) -> tuple[int, float, float]:
-    fs = max(1, int(font_size))
-    bold = str(el.get("font_weight", "regular")) in ("bold", "semibold", "extrabold", "black")
-    adv = fs * (0.58 if bold else 0.52) + _num(el.get("letter_spacing"))
-    lh = _num(el.get("line_height"), 1.2) or 1.2
-    lines, cur, widest = 1, 0.0, 0.0
-    for word in str(el.get("content", "")).split(" "):
-        ww = len(word) * adv
-        sep = adv if cur else 0.0
-        if cur and cur + sep + ww > box_w:
-            lines, cur = lines + 1, 0.0
-            sep = 0.0
-        cur += sep + ww
-        widest = max(widest, cur)
-    return lines, widest, (lines - 1) * fs * lh + 1.2 * fs
-from typing import Any
+    """Renderer wrap parity; drawn span advances include integer sizing and letter spacing.
+
+    Height is the font-metric envelope, not the tight visible-pixel bounding box.
+    Pillow is an approximate offline fallback when renderer imports are unavailable.
+    """
+    import json
+    keys = ("content", "font_family", "font_weight", "font_style", "italic", "color", "style_runs", "letter_spacing", "line_height", "capitalize")
+    payload = json.dumps({k: el[k] for k in keys if k in el}, sort_keys=True)
+    return _measure_cached(payload, max(1.0, _num(font_size, 1)), max(0.0, _num(box_w)), _font_manager() is None)
+
+
+def _text_report(el, box, size, floor=None):
+    lines, width, height = _measure_text(el, size, box.w)
+    limit = el.get("max_lines")
+    return TextFit(size, lines, width, height,
+                   width <= box.w + 1e-7 and height <= box.h + 1e-7 and (limit is None or lines <= limit),
+                   size < (TUNABLES["fit_default_floor"] if floor is None else floor))
+
+
+def _fit_text(el: dict[str, Any], box: Box, size_cap: float) -> TextFit:
+    cap = max(1.0, _num(size_cap, 1))
+    top = _text_report(el, box, cap)
+    if top.fits:
+        return top
+    best = _text_report(el, box, 1.0)
+    if not best.fits:
+        return best
+    low, high = 1.0, cap
+    for _ in range(TUNABLES["fit_iterations"]):
+        middle = (low + high) / 2
+        trial = _text_report(el, box, middle)
+        if trial.fits:
+            low, best = middle, trial
+        else:
+            high = middle
+    return _text_report(el, box, best.font_size)
+
+
+def _aligned_box(slot, width, height, align):
+    horizontal, vertical = align
+    x = slot.x if horizontal == "left" else slot.right-width if horizontal == "right" else slot.cx-width/2
+    y = slot.y if vertical == "top" else slot.bottom-height if vertical == "bottom" else slot.cy-height/2
+    return Box(x, y, width, height)
+
+
+def _fit_image(el: dict[str, Any], slot: Box, align: tuple[str, str]) -> Box:
+    w, h = _num(el.get("width")), _num(el.get("height"))
+    if min(w, h, slot.w, slot.h) <= 0:
+        raise ValueError("Image and slot dimensions must be positive")
+    scale = min(slot.w/w, slot.h/h)
+    return _aligned_box(slot, w*scale, h*scale, align)
+
+
+def _set_box(el, box):
+    el.update(x=box.x, y=box.y, width=box.w, height=box.h)
+
+
+def _element_box(el):
+    return Box(*(_num(el.get(k)) for k in ("x", "y", "width", "height")))
+
+
+def _scale_unit(analysis, unit, slot, align):
+    group = _fit_image({"width": unit.src_box.w, "height": unit.src_box.h}, slot, align)
+    scale = group.w / unit.src_box.w
+    out = {}
+    for eid in unit.member_ids:
+        el = dict(analysis.elements[eid])
+        rel = unit.rel[eid]
+        _set_box(el, Box(group.x+rel.x*scale, group.y+rel.y*scale, rel.w*scale, rel.h*scale))
+        if el["type"] == "text":
+            el["font_size"] = max(1.0, _num(el.get("font_size"), 1)*scale)
+        out[eid] = el
+    return out
+
+
+def _place_fitted_text(el, box, fit, align=("center", "middle")):
+    el["font_size"] = fit.font_size
+    if not fit.fits:
+        _set_box(el, box)  # Keep honest allocation; the report records the overflow.
+        return
+    height = max(1.0, fit.text_h)
+    # Shrink about the existing center for rotated text: preserve the rotation pivot.
+    placement = _aligned_box(box, box.w, height, ("center", "middle") if el.get("rotation") else align)
+    _set_box(el, placement)
+
+
+def _fit_unit(analysis, unit, slot, align, text_scale):
+    if len(unit.member_ids) > 1 or unit.rotation:
+        out = _scale_unit(analysis, unit, slot, align)
+        for eid, el in out.items():
+            if el["type"] != "text":
+                continue
+            allocation = _element_box(el)
+            fit = _fit_text(el, allocation, el["font_size"])
+            # For unrotated labels, keep source insets but optionally widen their
+            # containing shape within the slot when the readability floor is missed.
+            source_label = _element_box(analysis.elements[eid])
+            containers = [sid for sid in unit.member_ids if analysis.elements[sid]["type"] == "shape"
+                          and _element_box(analysis.elements[sid]).contains(source_label, 0.5)]
+            if containers and not unit.rotation and fit.below_floor and not unit.has_image:
+                sid = min(containers, key=lambda i: _element_box(analysis.elements[i]).area)
+                shape = _element_box(out[sid])
+                # Only widen a simple shape+label pair, avoiding sibling collisions.
+                if len(unit.member_ids) == 2:
+                    left, right = max(0, allocation.x-shape.x), max(0, shape.right-allocation.right)
+                    expanded = Box(slot.x+left, allocation.y, max(0, slot.w-left-right), allocation.h)
+                    wider = _fit_text(el, expanded, el["font_size"])
+                    if wider.fits and wider.font_size > fit.font_size:
+                        _set_box(out[sid], Box(slot.x, shape.y, slot.w, shape.h))
+                        allocation, fit = expanded, wider
+            _place_fitted_text(el, allocation, fit)
+        return out
+    eid = unit.member_ids[0]
+    el = dict(analysis.elements[eid])
+    if el["type"] == "text":
+        fit = _fit_text(el, slot, _num(el.get("font_size"), 1)*text_scale)
+        _place_fitted_text(el, slot, fit, align)
+    elif el["type"] == "image":
+        _set_box(el, _fit_image(el, slot, align))
+    else:
+        _set_box(el, slot)
+    return {eid: el}
+
+
+def _enforce_hierarchy(analysis, fits: FittedCandidate) -> None:
+    """Lower sizes only; iterate sibling equality and source order to a fixed point."""
+    ids = [i for i in analysis.order if fits.elements[i]["type"] == "text"]
+    siblings = {}
+    for unit in analysis.units.values():
+        if unit.sibling_set is not None:
+            siblings.setdefault(unit.sibling_set, []).extend(i for i in unit.member_ids if i in ids)
+    sizes = {i: fits.elements[i]["font_size"] for i in ids}
+    for _ in range(len(ids)+1):
+        before = dict(sizes)
+        for members in siblings.values():
+            smallest = min(sizes[i] for i in members)
+            for i in members:
+                sizes[i] = smallest
+        for i in ids:
+            larger = [sizes[j] for j in ids if _num(analysis.elements[j].get("font_size")) > _num(analysis.elements[i].get("font_size"))]
+            if larger:
+                sizes[i] = min(sizes[i], min(larger))
+        if sizes == before:
+            break
+    for i, size in sizes.items():
+        el = fits.elements[i]
+        if size != el["font_size"]:
+            box = _element_box(el)
+            report = _fit_text(el, box, size)
+            _place_fitted_text(el, box, report)
+
+
+def fit_candidate(analysis: SourceAnalysis, cand: Candidate, target: dict[str, Any]) -> FittedCandidate:
+    """Fit all units; expose failures in notes/TextFit instead of aborting a batch.
+
+    This is fitting, not validation or selection: Dev 3 must reject collisions,
+    impossible tiny allocations, and any fit with errors before selecting it.
+    """
+    out = FittedCandidate(cand, {}, {}, {}, list(cand.notes))
+    canvas = Box(0, 0, max(1, _num(target.get("width"), 1)), max(1, _num(target.get("height"), 1)))
+    if _font_manager() is None:
+        out.notes.append("Text measurement uses approximate Pillow fallback")
+    for uid, unit in analysis.units.items():
+        try:
+            if uid in analysis.backgrounds:
+                members = {i: dict(analysis.elements[i]) for i in unit.member_ids}
+                for el in members.values():
+                    _set_box(el, canvas)
+            elif uid in analysis.decorations:
+                members = _scale_unit(analysis, unit, cand.deco[uid], ("center", "middle"))
+            else:
+                members = _fit_unit(analysis, unit, cand.slots[uid], cand.align.get(uid, ("center", "middle")), cand.scales.get(uid, cand.k))
+            out.elements.update(members)
+        except Exception as exc:
+            out.notes.append(f"FIT ERROR {uid}: {type(exc).__name__}: {exc}")
+            # Retain every element and its content even when a candidate is malformed.
+            try:
+                out.elements.update(_scale_unit(analysis, unit, canvas, ("center", "middle")))
+            except Exception:
+                for i in unit.member_ids:
+                    el = dict(analysis.elements[i])
+                    out.elements[i] = el  # Invalid source geometry stays visible to validation.
+    try:
+        _enforce_hierarchy(analysis, out)
+    except Exception as exc:
+        out.notes.append(f"FIT ERROR hierarchy: {exc}")
+    try:
+        floors = _Ctx(analysis, target).floors  # Use Dev 1's full readability floors, not relaxed rung.
+    except Exception:
+        floors = {}
+    for uid, unit in analysis.units.items():
+        out.used[uid] = _union([_rotated_aabb(out.elements[i]) for i in unit.member_ids])
+        for i in unit.member_ids:
+            el = out.elements[i]
+            if el["type"] == "text":
+                try:
+                    report = _text_report(el, _element_box(el), el["font_size"], floors.get(uid, TUNABLES["fit_default_floor"]))
+                except Exception as exc:
+                    out.notes.append(f"FIT ERROR text {i}: {exc}")
+                    report = TextFit(_num(el.get("font_size"), 1), 0, 0, 0, False, True)
+                out.text[i] = report
+                if not report.fits:
+                    out.notes.append(f"Text overflow: {i}")
+                if report.below_floor:
+                    out.notes.append(f"Below readability floor: {i} ({report.font_size:.2f}px)")
+    out.elements = {i: out.elements[i] for i in analysis.order}
+    return out
 
 
 # =====================================================================================
