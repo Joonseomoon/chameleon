@@ -133,6 +133,7 @@ These are facts about the vendored code. They are not rules, but ignoring them w
 | R12 | `requirements.txt` installs `cr-renderer` from an unpinned git URL. The local environment has commit `a17e1fb`. | [`requirements.txt`](../requirements.txt) | A future upstream change could alter rendering or measurement. Proposed fix: pin the commit (task T3.6). |
 | R13 | Docker uses Python 3.11 and the local venv uses 3.13. | [`Dockerfile`](../Dockerfile) | Code must be valid on 3.11. For example, no `type` alias statements (3.12+). |
 | R14 | An unknown `font_family` falls back to an available brand family and prints a message. It does not raise. | `cr_renderer/fonts.py` (verified locally) | Measurement stays consistent with rendering even for unexpected fonts. |
+| R15 | Text measures differently by platform: on macOS skia uses CoreText (fractional glyph advances); in the Linux container it uses FreeType (integer advances). Reported widths differ by up to ~8.5% at 10 px, and roughly 1 wrap in 10 flips. | [`analysis-2026-10-13.md` §1](analysis-2026-10-13.md#1-what-the-repo-is-and-what-actually-happens-at-render-time) (reported there; not yet re-verified by us) | Local and Docker JSON will not be byte-identical whenever text is fitted. Compare two Docker runs with each other, and local against Docker only with a tolerance. Dev 1's 96% width slack absorbs part of the gap. |
 
 ### 2.3 Unresolved or conflicting requirements
 
@@ -552,7 +553,7 @@ Status as of 2026-10-17: ✅ done · 🟡 partly · ❌ not done · ⏸ deferred
 | T1.4 | P0 | Dev 1 | `_candidate_lanes` (both orientations, partition enumeration with cap) | T1.2 | L2 produces ≥ 3 lane candidates; a synthetic 30-element design generates candidates in < 1 s | 🟡 Mostly. Wide targets get 1–4 lanes; tall targets only the single stack. L2 gets 8 lane candidates. A 33-element design takes ≤ ~1 s. |
 | T2.4 | P0 | Dev 2 | `_enforce_hierarchy` + sibling consistency | T2.2 | Source font-size order preserved in every output; L3 badge labels share one size | ✅ Done. |
 | T3.5 | P0 | Dev 3 | `_repair` + fallback reasons + floor-hit logging | T3.4 | Forced-failure test (all candidates invalid) yields valid JSON with a `FALLBACK:` line on stderr | ✅ Done. Repair tries 3 candidates, not 1. |
-| T3.6 | P0 | Dev 3 | Docker build and `--network none` run on all samples; propose pinning `cr-renderer` to the tested commit | T3.2 | Docker output JSON identical to local output; pin proposed in a PR, merged only with team agreement | ❌ Not done. Docker unavailable on the dev machine so far; cr-renderer pin not yet proposed. |
+| T3.6 | P0 | Dev 3 | Docker build and `--network none` run on all samples; propose pinning `cr-renderer` to the tested commit | T3.2 | two Docker runs give byte-identical JSON, and local vs Docker output agrees within tolerance (R15); pin proposed in a PR, merged only with team agreement | ❌ Not done. Docker unavailable on the dev machine so far; cr-renderer pin not yet proposed. |
 | T3.7 | P0 | Dev 3 | README: "Approach" section + run/eval instructions | T3.5 | A teammate can reproduce the evaluation from the README alone | ⏸ Deferred by team decision; README unchanged for now. |
 | T1.5 | P1 | Dev 1 | Corner-pinned variants | T1.4 | Pinned variant chosen only when score improves; no new collisions | 🟡 Partly. Corner units are always pinned in lanes; no separate variants. |
 | T1.6 | P1 | Dev 1 | Implicit containment units: an ungrouped shape that fully contains a higher-z text element travels with it | T1.1 | A synthetic button without `group_id` keeps its label inside | ✅ Done. |
@@ -605,6 +606,11 @@ For every **(design, target)** pair, `tools/evaluate.py`:
   1080×1080 (square post), 1080×1350 (portrait post), 1080×1920 (story), 1200×628 (link/ad landscape),
   1280×720 (video thumbnail), 1500×500 (header), 1584×396 (wide banner), 728×90 (leaderboard),
   300×250 (medium rectangle), 160×600 (skyscraper), 320×50 (mobile banner), 2480×3508 (A4 print, large).
+- **Reference layouts** (visual targets, hand-built by Owen): L2 → 1600×400, L2 → 160×600, and L3 → 728×90, in
+  [`analysis-2026-10-13/reference_layouts/`](analysis-2026-10-13/reference_layouts/). They are not valid outputs
+  (decorations bleed, some text boxes are shorter than their text), but show what is achievable. At 728×90 the
+  reference keeps every element with 6–12 px text and our scorer rates it 0.850, against 0.754 for our engine's pick;
+  the gap is in layout generation, not scoring.
 - **Synthetic variants** built by transforming the samples. No new assets or fonts are added:
   - Rename every `id`, `group_id`, and `asset_id` to random strings. Output geometry must be identical.
   - Shuffle the element list order (allowed to change ties only; must stay valid).
@@ -672,7 +678,8 @@ Iteration 1 is done when **all** of the following are true. Ticked items are ver
 - [x] Invariance and determinism tests pass. *(Full-output rename invariance checked by hand on 5 sizes; should move
       into `evaluate.py`.)*
 - [x] `resize()` never raises. A forced internal error produces valid fallback output and a `FALLBACK:` stderr line.
-- [ ] `docker build --platform linux/amd64` and `docker run --network none` succeed and match local outputs.
+- [ ] `docker build --platform linux/amd64` and `docker run --network none` succeed; two Docker runs give
+      byte-identical JSON; Docker and local output agree within tolerance (byte identity is impossible, R15).
 - [x] Runtime stays reasonable: target under a few seconds per task locally, not counting rendering (C14). *(Samples
       take under 0.4 s; a 33-element design about 1 s.)*
 - [ ] Code runs on Python 3.11 (Docker) and 3.13 (local venv). *(3.13 verified; 3.11 only parsed, not run.)*
@@ -700,6 +707,8 @@ Iteration 1 is done when **all** of the following are true. Ticked items are ver
 | **Overfitting to three samples** | High / High | Renaming invariance, the broad target set, a held-out subset, and the review rule in §9.4. | All |
 | **Schema or rules change** (v0.9 is provisional) | Med / Med | Copy-through output (P4). Re-run evaluation on any new materials. | Dev 3 |
 | **Docker/amd64 surprises** on the reference Apple hardware (emulation, skia libs) | Low / High | Docker run at M1 and M4. No new dependencies. | Dev 3 |
+| **Slow or bloated Docker builds**: there is no `.dockerignore`, so the 341 MB `.venv` (plus `.git`, `output/`) is sent as build context on every build | High / Low | Add `.dockerignore` with `.venv .git output __pycache__ docs tools tests prototypes`. The Dockerfile copies only named folders, so the image itself is unaffected. | Dev 3 |
+| **Unpinned dependencies**: `requirements.txt` takes `cr-renderer` at HEAD and Pillow at `>=10.0`, so an upstream change can silently alter measurement or rendering between our tests and scoring | Med / High | Pin `cr-renderer` to commit `a17e1fb` and the resolved wheel set (exact list in [`analysis-2026-10-13.md` §6](analysis-2026-10-13.md#6-work-plan)), with team agreement (T3.6). | Dev 3 |
 | **Decorations behind text**: `_place_decorations` ignores content, so faint circles land behind the subhead or CTA (L2 three-lane choice, L3 at 1200×628) | **Observed** / Low–Med | Text stays readable (alpha ≤ 0.5), and S2 does not count it. Either steer decorations away from text ink (Dev 1) or add a small soft penalty (Dev 3). | Dev 1 / Dev 3 |
 | **Wasted lane width**: leftover width is shared evenly across margins and gutters, so a small logo's lane takes width the text lanes need (L3 at 728×90, ~85 px) | **Observed** / Med | Untested hypothesis: give surplus width to text lanes, or let rigid single-unit lanes grow past `lane_boost`. | Dev 1 |
 | **Scoring tuned on three samples**: weights were adjusted until L1 and L2 picked what we judged best | High / Med | `test_resize.py` pins those choices so changes are deliberate. Held-out tuning (T3.9) once `evaluate.py` exists. | Dev 3 |
@@ -723,8 +732,9 @@ Iteration 1 is done when **all** of the following are true. Ticked items are ver
 7. **Q7:** Is the ~5% proportion tolerance measured against the source element box or the asset's intrinsic pixels?
 8. **Q8:** May production code be split into extra modules under `engine/`? The Dockerfile copies the whole folder.
    (We stay in `resize.py` until this is answered.)
-9. **Q9 (R11, R3):** The renderer treats `style_runs.end` as inclusive and ignores `letter_spacing` when wrapping. Is
-   the official scoring renderer identical to the vendored one?
+9. **Q9 (R11, R3, R15):** The renderer treats `style_runs.end` as inclusive and ignores `letter_spacing` when wrapping. Is
+   the official scoring renderer identical to the vendored one? Is our submitted PNG scored, or is our JSON
+   re-rendered, and on which OS (native macOS or the Docker image)?
 10. **Q10 (U10):** What are the exact reference hardware limits, and is the image run natively or under amd64 emulation?
 11. **Q11 (C13, §12):** Does any stage allow network access, for example to call a hosted LLM API? If not, which local
     models are allowed, and what image size limit applies?
@@ -795,3 +805,4 @@ Departures from the plan above, and why. Each is reflected in the relevant secti
 | I8 | Repair tries the 3 best failures instead of 1; a last-resort path returns source geometry if the fallback itself fails | §5.5 | Bounded, and keeps the never-raise guarantee absolute. |
 | I9 | Dev 2's handoff note (`docs/dev2-fitting.md`) folded into this plan (§4.2, §9.5, §11.1) and deleted | — | Its usage notes were superseded by the integrated `resize()`. |
 | I10 | `Candidate`, `LayoutUnit`, `src_overlaps` gained fields | §4.1 | Generation needed to tell fitting and scoring the scale, rung, and furniture it used. |
+| I11 | Owen's [`analysis-2026-10-13.md`](analysis-2026-10-13.md) merged as a historical snapshot. Its platform-measurement finding (R15), `.dockerignore`, pinning, renderer/OS question (Q9), and reference layouts (§9.2) were folded in here | §2.2, §9.2, §11 | Several of its recommendations were already adopted by Dev 1 (floor table, floor ladder, containment, asset ink). |
