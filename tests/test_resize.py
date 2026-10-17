@@ -1,4 +1,4 @@
-"""Dev 3 tests: validation, selection, repair, fallback and resize() orchestration (plan tasks T3.2, T3.4, T3.5).
+"""Dev 3 tests: validation, selection, repair, fallback and resize() orchestration (docs/engine.md §8).
 Run: .venv/bin/python -m unittest discover -s tests -p test_resize.py -v"""
 import copy
 import json
@@ -35,7 +35,7 @@ STRUCTURAL = ('H1', 'H2', 'H4', 'H5')   # ids, fields, on canvas / >= 1 px, imag
 
 class ResizeTests(unittest.TestCase):
     def test_every_sample_and_size_passes_the_hard_checks(self):
-        """Selected layouts pass every hard check. A fallback (plan §5.5) only promises structural validity: on
+        """Selected layouts pass every hard check. A fallback (docs/engine.md §8) only promises structural validity: on
         extreme targets its 1 px text may still touch or poke out of its shape."""
         fallbacks = []
         for level in (1, 2, 3):

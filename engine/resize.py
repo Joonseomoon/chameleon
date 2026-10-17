@@ -17,7 +17,7 @@ from typing import Any
 
 from functools import lru_cache
 
-# Section ownership (docs/iteration-1-plan.md §6). Each developer edits only their own sections.
+# Section ownership (docs/engine.md §4). Each developer edits only their own sections.
 #   §0 shared types, geometry, TUNABLES ........... Dev 3 (changes reviewed by all)
 #   §1 source analysis ............................ Dev 1
 #   §2 candidate generation ....................... Dev 1
@@ -28,7 +28,7 @@ from functools import lru_cache
 # §0 Shared types, geometry, TUNABLES
 # =====================================================================================
 
-TUNABLES: dict[str, Any] = {}  # every number is PROVISIONAL (plan §5); sections add their own keys
+TUNABLES: dict[str, Any] = {}  # every number is PROVISIONAL (docs/engine.md); sections add their own keys
 
 
 @dataclass(frozen=True)
@@ -616,7 +616,7 @@ def _member_ink(el: dict[str, Any], canvas_area: float) -> Box:
 
 
 def _containers(els: list[dict[str, Any]], grouped: set[int], cw: int, ch: int) -> dict[int, int]:
-    """Implicit containment (plan T1.6): ungrouped text index -> index of the SMALLEST opaque, non-bleeding shape below
+    """Implicit containment (docs/engine.md §5): ungrouped text index -> index of the SMALLEST opaque, non-bleeding shape below
     it that contains it. A pill and its label with no group_id therefore still travel together."""
     cands = []
     for i, e in enumerate(els):
@@ -680,7 +680,7 @@ def _build_units(els: list[dict[str, Any]], cw: int, ch: int) -> dict[str, Layou
 
 
 def _classify_units(an: SourceAnalysis) -> None:
-    """background | decoration | content, plus aspect_locked. Coverage and alpha rules of plan §5.1."""
+    """background | decoration | content, plus aspect_locked. Coverage and alpha rules of docs/engine.md §5."""
     T = TUNABLES
     cv = Box(0, 0, an.canvas_w, an.canvas_h)
     first = lambda u: int(u.uid[1:])
@@ -845,7 +845,7 @@ TUNABLES.update({
     "text_slack_w": 0.96, "text_slack_h": 1.0,    # fit slack handed to Dev 2: text <= 96% of the box width, +1 px of height
     "text_cap_w": 1.25,                           # a text block never grows beyond this multiple of its scaled source width
     "bind_ratio": 1.2,                            # consecutive text-only blocks with font sizes this far apart stay in one lane
-    "deco_bleed": False,                          # keep decoration bleed (plan U1 / Q1); False clamps decorations inside
+    "deco_bleed": False,                          # keep decoration bleed (docs/engine.md Q1); False clamps decorations inside
     "k_iters": 14, "k_min": 0.004, "lane_boost": 2.0,   # per-lane growth beyond the common scale
 })
 
@@ -1354,7 +1354,7 @@ def generate_candidates(an: SourceAnalysis, target: dict[str, Any]) -> list[Cand
 
 # =====================================================================================
 # §4 Validation and scoring (Dev 3)
-# validate() runs the hard checks H1-H8 (plan §5.3) on the FINAL output elements and the soft metrics S1-S7 (§5.4).
+# validate() runs the hard checks H1-H8 on the FINAL output elements and the soft metrics S1-S8 (docs/engine.md §8).
 # A candidate with any hard failure is never selected as-is.
 # =====================================================================================
 
@@ -1623,7 +1623,7 @@ def _repair(analysis: SourceAnalysis, fitted: FittedCandidate, target: dict[str,
 
 def fallback_layout(source: dict[str, Any], target: dict[str, Any]) -> dict[str, Any]:
     """Letterbox: backgrounds full-bleed, everything else one rigid composition at s = min(sx, sy), centred. Always
-    structurally valid; visually weak on extreme ratios (plan §5.5). Uses as little of the engine as possible."""
+    structurally valid; visually weak on extreme ratios (docs/engine.md §8). Uses as little of the engine as possible."""
     tw, th = _target_size(target)
     canvas = source.get("canvas") or {}
     sw, sh = max(1.0, _num(canvas.get("width"), 1.0)), max(1.0, _num(canvas.get("height"), 1.0))
@@ -1793,6 +1793,6 @@ def resize(source: dict[str, Any], target_canvas: dict[str, Any]) -> dict[str, A
         _log(f"{tag} FALLBACK: {type(exc).__name__}: {exc}")
         try:
             return fallback_layout(source, {"width": tw, "height": th})
-        except Exception as exc2:   # last resort: never raise out of resize() (plan R8)
+        except Exception as exc2:   # last resort: never raise out of resize() (docs/engine.md R8)
             _log(f"{tag} FALLBACK FAILED: {type(exc2).__name__}: {exc2}; returning the source geometry")
             return {"canvas": {"width": tw, "height": th}, "elements": [dict(e) for e in source.get("elements") or []]}

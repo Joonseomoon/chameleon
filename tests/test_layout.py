@@ -1,4 +1,4 @@
-"""Dev 1 acceptance tests: source analysis and candidate generation (plan tasks T1.1-T1.6).
+"""Dev 1 acceptance tests: source analysis and candidate generation (docs/engine.md §5-§6).
 Run: python -m pytest tests/test_layout.py   (or python tests/test_layout.py)"""
 import copy
 import glob

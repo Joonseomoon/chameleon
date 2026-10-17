@@ -1,4 +1,4 @@
-"""Evaluation harness (plan §9, tasks T3.3 and T3.8). Dev-only: not copied into the Docker image.
+"""Evaluation harness (docs/engine.md "Run it"). Dev-only: not copied into the Docker image.
 
 For every sample in input/ x every target size it runs our resize() and the starter's uniform stretch, renders both
 next to the source, and records hard checks, soft scores, the chosen layout, fallbacks, text size and runtime. It also
@@ -10,7 +10,7 @@ Run from the repository root:
     .venv/bin/python tools/evaluate.py --sizes 728x90 1200x628
     .venv/bin/python tools/evaluate.py --no-render          # numbers only, no contact sheets
 
-Inside the image (Linux text measurement, as in scoring; plan R15):
+Inside the image (Linux text measurement, as in scoring; docs/engine.md R15):
     docker run --rm --network none --entrypoint python -v "$PWD/input:/app/input:ro" -v "$PWD/tools:/app/tools:ro" \
       -v "$PWD/docs:/app/docs:ro" -v "$PWD/output:/app/output" chameleon-engine tools/evaluate.py
 
@@ -36,7 +36,8 @@ sys.path.insert(0, str(ROOT))
 import engine.resize as r  # noqa: E402
 from engine.main import self_check  # noqa: E402
 
-# Plan §9.2 target set, plus each sample's own target. HELD_OUT is the §9.4 subset: look at it, never tune on it.
+# Common catalogue sizes (our stand-in for the unpublished list), plus each sample's own target.
+# HELD_OUT: look at these, never tune on them (docs/engine.md B7).
 TARGETS = [(1080, 1080), (1080, 1350), (1080, 1920), (1200, 628), (1280, 720), (1500, 500), (1584, 396), (728, 90),
            (300, 250), (160, 600), (320, 50), (2480, 3508)]
 HELD_OUT = {(320, 50), (160, 600), (2480, 3508)}
@@ -46,7 +47,7 @@ TILE_W, TILE_H = 420, 300
 
 
 def baseline(source: dict, target: dict) -> dict:
-    """The starter's uniform stretch, reproduced here so production code doesn't keep it (plan §9.1)."""
+    """The starter's uniform stretch, reproduced here so production code doesn't keep it."""
     sx, sy = target["width"] / source["canvas"]["width"], target["height"] / source["canvas"]["height"]
     els = []
     for el in source["elements"]:
@@ -89,7 +90,7 @@ def run_ours(source: dict, target: dict) -> tuple[dict, str, float]:
 
 
 def schema_errors(out: dict) -> str:
-    """H9 when jsonschema is installed (dev-only dependency, plan §9.1)."""
+    """H9 when jsonschema is installed (dev-only dependency)."""
     try:
         import jsonschema
     except ImportError:
@@ -101,7 +102,7 @@ def schema_errors(out: dict) -> str:
 
 def invariance(source: dict, target: dict, ours: dict) -> dict[str, bool]:
     """T3.8: deterministic rerun, renamed ids and group ids, shuffled element order.
-    Asset ids are NOT renamed: Dev 1 reads each asset's alpha bounds by file name (plan P7), so a renamed asset is a
+    Asset ids are NOT renamed: Dev 1 reads each asset's alpha bounds by file name (docs/engine.md §3), so a renamed asset is a
     missing asset and may legitimately change the layout."""
     geometry = lambda o: sorted((e["id"], e["x"], e["y"], e["width"], e["height"], e.get("font_size")) for e in o["elements"])
     rerun = run_ours(source, target)[0]
@@ -154,7 +155,7 @@ def contact_sheet(rows: list[tuple[str, list[tuple[str, object]]]], path: Path) 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--sizes", nargs="*", help="targets like 728x90 (default: plan §9.2 set + each sample's own)")
+    ap.add_argument("--sizes", nargs="*", help="targets like 728x90 (default: the 12 catalogue sizes + each sample's own)")
     ap.add_argument("--quick", action="store_true", help="each sample's own target only")
     ap.add_argument("--no-render", action="store_true", help="skip contact sheets")
     args = ap.parse_args()

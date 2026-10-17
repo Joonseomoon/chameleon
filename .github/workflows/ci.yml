@@ -1,5 +1,5 @@
 # Builds the submission image and runs it the way stage-one scoring does (linux/amd64, --network none).
-# GitHub's ubuntu runners are native amd64, so this is also the reference for FreeType text measurement (plan R15).
+# GitHub's ubuntu runners are native amd64, so this is also the reference for FreeType text measurement (docs/engine.md R15).
 name: ci
 
 on:
