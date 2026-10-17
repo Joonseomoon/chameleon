@@ -1,0 +1,55 @@
+# Builds the submission image and runs it the way stage-one scoring does (linux/amd64, --network none).
+# GitHub's ubuntu runners are native amd64, so this is also the reference for FreeType text measurement (plan R15).
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build image
+        run: docker build --platform linux/amd64 -t chameleon-engine .
+
+      - name: Run engine offline on the samples (twice)
+        run: |
+          for run in 1 2; do
+            mkdir -p "out$run"
+            docker run --rm --network none \
+              -v "$PWD/input:/app/input:ro" -v "$PWD/out$run:/app/output" \
+              chameleon-engine 2>&1 | tee "run$run.log"
+          done
+
+      - name: No fallbacks or self-check warnings
+        run: |
+          if grep -E "FALLBACK|self-check warning" run1.log; then
+            echo "::error::engine fell back or failed its self-check"; exit 1
+          fi
+
+      - name: Deterministic output (two runs, byte-identical JSON)
+        run: |
+          for f in out1/*_output.json; do
+            cmp "$f" "out2/$(basename "$f")" || { echo "::error::$f differs between runs"; exit 1; }
+          done
+
+      - name: Test suites inside the image (Python 3.11, FreeType)
+        run: |
+          docker run --rm --network none --entrypoint sh \
+            -v "$PWD/input:/app/input:ro" -v "$PWD/tests:/app/tests:ro" \
+            chameleon-engine -c "python tests/test_layout.py && python -m unittest discover -s tests -p 'test_*.py' -v"
+
+      - name: Upload outputs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-output
+          path: |
+            out1/
+            run1.log

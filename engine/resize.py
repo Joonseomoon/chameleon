@@ -192,7 +192,7 @@ class Report:
 # Failed fits are reported, never hidden by deleting or changing source content.
 # =====================================================================================
 
-TUNABLES.update({"fit_iterations": 24, "fit_default_floor": 12.0})
+TUNABLES.update({"fit_default_floor": 12.0})
 
 
 @lru_cache(maxsize=1)
@@ -320,22 +320,23 @@ def _text_report(el, box, size, floor=None):
 
 
 def _fit_text(el: dict[str, Any], box: Box, size_cap: float) -> TextFit:
-    cap = max(1.0, _num(size_cap, 1))
+    """Largest WHOLE font size <= size_cap that fits. The renderer draws glyphs at int(font_size), so only whole sizes
+    keep the measured wrap and height equal to what is drawn."""
+    cap = max(1, int(_num(size_cap, 1)))
     top = _text_report(el, box, cap)
     if top.fits:
         return top
-    best = _text_report(el, box, 1.0)
+    best = _text_report(el, box, 1)
     if not best.fits:
         return best
-    low, high = 1.0, cap
-    for _ in range(TUNABLES["fit_iterations"]):
-        middle = (low + high) / 2
-        trial = _text_report(el, box, middle)
-        if trial.fits:
-            low, best = middle, trial
+    low, high = 1, cap          # low always fits, high never does
+    while high - low > 1:
+        middle = (low + high) // 2
+        if _text_report(el, box, middle).fits:
+            low = middle
         else:
             high = middle
-    return _text_report(el, box, best.font_size)
+    return _text_report(el, box, low)
 
 
 def _aligned_box(slot, width, height, align):
@@ -1657,6 +1658,22 @@ def fallback_layout(source: dict[str, Any], target: dict[str, Any]) -> dict[str,
         dy = -aabb.y if aabb.y < 0 else th - aabb.bottom if aabb.bottom > th else 0.0
         _set_box(el, nb.translated(dx, dy))
         out.append(el)
+    # A label that grew to its measured height can poke out of its pill at tiny scales; grow the pill instead
+    # (shapes are not proportion-locked), so labels stay inside their shapes (H7).
+    src_els = source.get("elements") or []
+    src_box = [Box(_num(e.get("x")), _num(e.get("y")), _num(e.get("width")), _num(e.get("height"))) for e in src_els]
+    for ti, t in enumerate(out):
+        if t.get("type") != "text" or _num(t.get("rotation")):
+            continue
+        holders = [si for si, s in enumerate(out) if s.get("type") == "shape" and not _num(s.get("rotation"))
+                   and src_box[si].contains(src_box[ti], 0.5)]
+        if not holders:
+            continue
+        si = min(holders, key=lambda i: src_box[i].area)
+        tb, sb = _element_box(t), _element_box(out[si])
+        if not sb.contains(tb, 0.0):
+            u = _union([tb, sb])
+            _set_box(out[si], Box(max(0.0, u.x), max(0.0, u.y), min(u.w, tw), min(u.h, th)))
     els = {str(i): e for i, e in enumerate(out)}
     _round_elements(els)
     return {"canvas": {"width": tw, "height": th}, "elements": out}
@@ -1684,13 +1701,15 @@ def _sanitize(source: dict[str, Any]) -> dict[str, Any]:
 
 
 def _round_elements(els: dict[str, dict[str, Any]]) -> None:
-    """Two decimals for geometry; font sizes are rounded DOWN so a fitted text never grows."""
+    """Two decimals for geometry. Font sizes become whole numbers, rounded DOWN: cr-renderer draws glyphs at
+    int(font_size) but spaces lines with the float, so a fractional size only makes measurement and drawing disagree.
+    Rounding down never makes fitted text wider, taller, or wrap onto more lines."""
     for el in els.values():
         for k in ("x", "y", "width", "height"):
             if isinstance(el.get(k), (int, float)):
                 el[k] = round(el[k], 2)
-        if el.get("type") == "text" and isinstance(el.get("font_size"), (int, float)):
-            el["font_size"] = max(1.0, math.floor(el["font_size"] * 100) / 100)
+        if el.get("type") == "text" and isinstance(el.get("font_size"), (int, float)) and math.isfinite(el["font_size"]):
+            el["font_size"] = max(1, int(el["font_size"]))
 
 
 def _log(msg: str) -> None:

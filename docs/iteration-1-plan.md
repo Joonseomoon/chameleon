@@ -24,8 +24,10 @@ form "Brief §N".
   readability floor (§5.6).
 - **Verified:** 26 tests pass (§9.5). Every sample at 13 target sizes passes all hard checks and the `main.py`
   self-check. Output is deterministic and unchanged when every id and group id is renamed.
-- **Outstanding:** `tools/evaluate.py` (T3.3, T3.8), the Docker offline run (T3.6), a real Python 3.11 run, the README
-  "Approach" section (T3.7, deferred by team decision), and the P1/P2 tasks in §7.
+- **Docker:** the image builds with fully pinned dependencies and runs offline (`--network none`) on all three
+  samples; two runs give byte-identical JSON, and all 26 tests pass inside it on Python 3.11.
+- **Outstanding:** `tools/evaluate.py` (T3.3, T3.8), the first CI run on GitHub (workflow written, not yet
+  run), the README "Approach" section (T3.7, deferred by team decision), and the P1/P2 tasks in §7.
 - Sections below describe the engine **as built**. Where the build departed from the original plan, the text says so,
   and §14 lists every departure.
 
@@ -133,7 +135,7 @@ These are facts about the vendored code. They are not rules, but ignoring them w
 | R12 | `requirements.txt` installs `cr-renderer` from an unpinned git URL. The local environment has commit `a17e1fb`. | [`requirements.txt`](../requirements.txt) | A future upstream change could alter rendering or measurement. Proposed fix: pin the commit (task T3.6). |
 | R13 | Docker uses Python 3.11 and the local venv uses 3.13. | [`Dockerfile`](../Dockerfile) | Code must be valid on 3.11. For example, no `type` alias statements (3.12+). |
 | R14 | An unknown `font_family` falls back to an available brand family and prints a message. It does not raise. | `cr_renderer/fonts.py` (verified locally) | Measurement stays consistent with rendering even for unexpected fonts. |
-| R15 | Text measures differently by platform: on macOS skia uses CoreText (fractional glyph advances); in the Linux container it uses FreeType (integer advances). Reported widths differ by up to ~8.5% at 10 px, and roughly 1 wrap in 10 flips. | [`analysis-2026-10-13.md` §1](analysis-2026-10-13.md#1-what-the-repo-is-and-what-actually-happens-at-render-time) (reported there; not yet re-verified by us) | Local and Docker JSON will not be byte-identical whenever text is fitted. Compare two Docker runs with each other, and local against Docker only with a tolerance. Dev 1's 96% width slack absorbs part of the gap. |
+| R15 | Text measures differently by platform: on macOS skia uses CoreText (fractional glyph advances); in the Linux container it uses FreeType (integer advances). Reported widths differ by up to ~8.5% at 10 px, and roughly 1 wrap in 10 flips. | [`analysis-2026-10-13.md` §1](analysis-2026-10-13.md#1-what-the-repo-is-and-what-actually-happens-at-render-time) (reported there; **confirmed by us** in Docker on 2026-10-17) | Observed: L2's headline fits at 64 px in Docker vs 62 px locally, and L3 generates 16 candidates in Docker vs 15 locally. Local and Docker JSON will not be byte-identical whenever text is fitted. Compare two Docker runs with each other, and local against Docker only with a tolerance. Dev 1's 96% width slack absorbs part of the gap. |
 
 ### 2.3 Unresolved or conflicting requirements
 
@@ -553,7 +555,7 @@ Status as of 2026-10-17: ✅ done · 🟡 partly · ❌ not done · ⏸ deferred
 | T1.4 | P0 | Dev 1 | `_candidate_lanes` (both orientations, partition enumeration with cap) | T1.2 | L2 produces ≥ 3 lane candidates; a synthetic 30-element design generates candidates in < 1 s | 🟡 Mostly. Wide targets get 1–4 lanes; tall targets only the single stack. L2 gets 8 lane candidates. A 33-element design takes ≤ ~1 s. |
 | T2.4 | P0 | Dev 2 | `_enforce_hierarchy` + sibling consistency | T2.2 | Source font-size order preserved in every output; L3 badge labels share one size | ✅ Done. |
 | T3.5 | P0 | Dev 3 | `_repair` + fallback reasons + floor-hit logging | T3.4 | Forced-failure test (all candidates invalid) yields valid JSON with a `FALLBACK:` line on stderr | ✅ Done. Repair tries 3 candidates, not 1. |
-| T3.6 | P0 | Dev 3 | Docker build and `--network none` run on all samples; propose pinning `cr-renderer` to the tested commit | T3.2 | two Docker runs give byte-identical JSON, and local vs Docker output agrees within tolerance (R15); pin proposed in a PR, merged only with team agreement | ❌ Not done. Docker unavailable on the dev machine so far; cr-renderer pin not yet proposed. |
+| T3.6 | P0 | Dev 3 | Docker build and `--network none` run on all samples; propose pinning `cr-renderer` to the tested commit | T3.2 | two Docker runs give byte-identical JSON, and local vs Docker output agrees within tolerance (R15); pin proposed in a PR, merged only with team agreement | 🟡 Mostly. Builds and runs offline locally (Docker Desktop, amd64 emulation); dependencies fully pinned (`requirements.txt`), `.dockerignore` added; `.github/workflows/ci.yml` written but not yet run on GitHub. |
 | T3.7 | P0 | Dev 3 | README: "Approach" section + run/eval instructions | T3.5 | A teammate can reproduce the evaluation from the README alone | ⏸ Deferred by team decision; README unchanged for now. |
 | T1.5 | P1 | Dev 1 | Corner-pinned variants | T1.4 | Pinned variant chosen only when score improves; no new collisions | 🟡 Partly. Corner units are always pinned in lanes; no separate variants. |
 | T1.6 | P1 | Dev 1 | Implicit containment units: an ungrouped shape that fully contains a higher-z text element travels with it | T1.1 | A synthetic button without `group_id` keeps its label inside | ✅ Done. |
@@ -678,11 +680,12 @@ Iteration 1 is done when **all** of the following are true. Ticked items are ver
 - [x] Invariance and determinism tests pass. *(Full-output rename invariance checked by hand on 5 sizes; should move
       into `evaluate.py`.)*
 - [x] `resize()` never raises. A forced internal error produces valid fallback output and a `FALLBACK:` stderr line.
-- [ ] `docker build --platform linux/amd64` and `docker run --network none` succeed; two Docker runs give
-      byte-identical JSON; Docker and local output agree within tolerance (byte identity is impossible, R15).
+- [x] `docker build --platform linux/amd64` and `docker run --network none` succeed; two Docker runs give
+      byte-identical JSON; Docker and local output agree within tolerance (byte identity is impossible, R15). *(Verified locally on 2026-10-17;
+      CI repeats it on every push once merged.)*
 - [x] Runtime stays reasonable: target under a few seconds per task locally, not counting rendering (C14). *(Samples
       take under 0.4 s; a 33-element design about 1 s.)*
-- [ ] Code runs on Python 3.11 (Docker) and 3.13 (local venv). *(3.13 verified; 3.11 only parsed, not run.)*
+- [x] Code runs on Python 3.11 (Docker) and 3.13 (local venv). *(All 26 tests pass in both.)*
 - [ ] README contains a short "Approach" section, run instructions, and the evaluation command. *(Deferred.)*
 - [x] Every `TUNABLES` entry is labeled provisional, and §11 and §12 of this document are updated with what we
       actually observed.
@@ -707,14 +710,14 @@ Iteration 1 is done when **all** of the following are true. Ticked items are ver
 | **Overfitting to three samples** | High / High | Renaming invariance, the broad target set, a held-out subset, and the review rule in §9.4. | All |
 | **Schema or rules change** (v0.9 is provisional) | Med / Med | Copy-through output (P4). Re-run evaluation on any new materials. | Dev 3 |
 | **Docker/amd64 surprises** on the reference Apple hardware (emulation, skia libs) | Low / High | Docker run at M1 and M4. No new dependencies. | Dev 3 |
-| **Slow or bloated Docker builds**: there is no `.dockerignore`, so the 341 MB `.venv` (plus `.git`, `output/`) is sent as build context on every build | High / Low | Add `.dockerignore` with `.venv .git output __pycache__ docs tools tests prototypes`. The Dockerfile copies only named folders, so the image itself is unaffected. | Dev 3 |
-| **Unpinned dependencies**: `requirements.txt` takes `cr-renderer` at HEAD and Pillow at `>=10.0`, so an upstream change can silently alter measurement or rendering between our tests and scoring | Med / High | Pin `cr-renderer` to commit `a17e1fb` and the resolved wheel set (exact list in [`analysis-2026-10-13.md` §6](analysis-2026-10-13.md#6-work-plan)), with team agreement (T3.6). | Dev 3 |
+| **Slow or bloated Docker builds**: there is no `.dockerignore`, so the 341 MB `.venv` (plus `.git`, `output/`) is sent as build context on every build | **Fixed** / Low | `.dockerignore` added, excluding `.venv .git output __pycache__ docs tools tests prototypes`. The Dockerfile copies only named folders, so the image itself is unaffected. | Dev 3 |
+| **Unpinned dependencies**: `requirements.txt` takes `cr-renderer` at HEAD and Pillow at `>=10.0`, so an upstream change can silently alter measurement or rendering between our tests and scoring | **Fixed** / High | All 40 packages pinned to the set resolved inside the image (cr-renderer at commit `a17e1fb`); `requirements.txt` explains how to upgrade. | Dev 3 |
 | **Decorations behind text**: `_place_decorations` ignores content, so faint circles land behind the subhead or CTA (L2 three-lane choice, L3 at 1200×628) | **Observed** / Low–Med | Text stays readable (alpha ≤ 0.5), and S2 does not count it. Either steer decorations away from text ink (Dev 1) or add a small soft penalty (Dev 3). | Dev 1 / Dev 3 |
 | **Wasted lane width**: leftover width is shared evenly across margins and gutters, so a small logo's lane takes width the text lanes need (L3 at 728×90, ~85 px) | **Observed** / Med | Untested hypothesis: give surplus width to text lanes, or let rigid single-unit lanes grow past `lane_boost`. | Dev 1 |
 | **Scoring tuned on three samples**: weights were adjusted until L1 and L2 picked what we judged best | High / Med | `test_resize.py` pins those choices so changes are deliberate. Held-out tuning (T3.9) once `evaluate.py` exists. | Dev 3 |
 | **Near-touching units in anchor**: push-apart only fires on actual overlap, not on gaps below `g` (L2 anchor: subhead almost touches the CTA) | Med / Low | Anchor is rarely chosen when this happens. Fix by pushing apart on `gap < g`. | Dev 1 |
 | **Failure reporting by string**: `FIT ERROR` is only a note prefix that validation matches by text | Low / Med | Works today; a renamed prefix would silently stop rejecting broken candidates. Add a structured flag on `FittedCandidate`. | Dev 2 / Dev 3 |
-| **Pillow version**: the offline fallback calls `ImageFont.load_default(size=…)`, which needs Pillow ≥ 10.1, but `requirements.txt` allows 10.0 | Low / Low | Only reached when the renderer import fails. Raise the pin to `Pillow>=10.1`. | Dev 2 |
+| **Pillow version**: the offline fallback calls `ImageFont.load_default(size=…)`, which needs Pillow ≥ 10.1, but `requirements.txt` allows 10.0 | **Fixed** / Low | Pillow is now pinned to 12.3.0. | Dev 2 |
 | **Network-dependent features**: stage-one scoring runs with `--network none` (C13), so runtime calls to a hosted LLM API would fail | High if adopted / High | Any LLM use must be a local model baked into the image, or offline-only (development, tuning). Confirm with organizers (Q11). | All |
 
 ### 11.2 Questions for organizers
@@ -806,3 +809,5 @@ Departures from the plan above, and why. Each is reflected in the relevant secti
 | I9 | Dev 2's handoff note (`docs/dev2-fitting.md`) folded into this plan (§4.2, §9.5, §11.1) and deleted | — | Its usage notes were superseded by the integrated `resize()`. |
 | I10 | `Candidate`, `LayoutUnit`, `src_overlaps` gained fields | §4.1 | Generation needed to tell fitting and scoring the scale, rung, and furniture it used. |
 | I11 | Owen's [`analysis-2026-10-13.md`](analysis-2026-10-13.md) merged as a historical snapshot. Its platform-measurement finding (R15), `.dockerignore`, pinning, renderer/OS question (Q9), and reference layouts (§9.2) were folded in here | §2.2, §9.2, §11 | Several of its recommendations were already adopted by Dev 1 (floor table, floor ladder, containment, asset ink). |
+| I12 | Font sizes are whole numbers: `_fit_text` searches integers only, and output rounds down | §4.2 | cr-renderer draws glyphs at `int(font_size)`. Rounding *after* fitting left L2's headline with a two-line box but one drawn line in Docker (R15). |
+| I13 | The fallback grows a pill to contain its label; the grid test holds fallback output to the structural checks (H1, H2, H4, H5) only, and allows at most one fallback | §5.5, §9.5 | Under Linux measurement, L3 at 320×50 has 1 px labels taller than their pills. The plan always promised structural validity, not layout quality, for the fallback. |
